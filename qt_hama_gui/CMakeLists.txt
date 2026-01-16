@@ -54,6 +54,15 @@ add_executable(qt_hama_gui
   ../onnx_classifier.cpp
 )
 
+if (WIN32)
+  set_target_properties(qt_hama_gui PROPERTIES WIN32_EXECUTABLE ON)
+  if (TARGET Qt6::EntryPoint)
+    target_link_libraries(qt_hama_gui PRIVATE Qt6::EntryPoint)
+  elseif (TARGET Qt6::WinMain)
+    target_link_libraries(qt_hama_gui PRIVATE Qt6::WinMain)
+  endif()
+endif()
+
 set_target_properties(qt_hama_gui PROPERTIES
   OUTPUT_NAME droplet_pipeline
 )
