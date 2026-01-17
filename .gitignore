@@ -2,6 +2,9 @@
 build/
 build_vs18/
 out/
+dist/
+installer_output/
+installer/third_party/
 *.obj
 *.pdb
 *.lib

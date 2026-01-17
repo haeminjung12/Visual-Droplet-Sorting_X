@@ -1,8 +1,8 @@
 Droplet pipeline (C++)
 
-This repository contains the full C++ pipeline for high‑speed droplet sorting:
-Hamamatsu DCAM frame capture -> event detection -> ONNX classification -> NI‑DAQ trigger.
-It includes the Qt GUI (primary entry point) and an optional headless CLI.
+This repository contains the full C++ pipeline for high-speed droplet sorting:
+Hamamatsu DCAM frame capture -> event detection -> ONNX classification -> NI-DAQ analog output.
+It includes the Qt GUI (primary entry point) and a CLI mode via the same executable.
 
 Overview and data flow
 1) Camera capture (Hamamatsu DCAM)
@@ -17,15 +17,15 @@ Overview and data flow
    - ONNX Runtime runs classification (Empty / Single / MoreThanTwo).
 4) Trigger output
    - If the classifier result matches target label (e.g., Single), the trigger fires.
-   - Trigger can be Digital or Counter output using NI‑DAQmx.
+   - Trigger is an analog sine wave using NI-DAQmx AO (configurable amplitude/frequency/duration/delay).
 
 Project layout (every source file)
-Root level (CLI + shared logic)
+Root level (shared logic + CLI runner)
 - CMakeLists.txt
-  - Top‑level build script. Configures vcpkg, OpenCV, ONNX Runtime, DCAM, NI‑DAQmx.
-  - Builds the CLI and adds the Qt GUI subdirectory.
-- main.cpp
-  - Headless CLI entry point. Parses command‑line args.
+  - Top-level build script. Configures vcpkg, OpenCV, ONNX Runtime, DCAM, NI-DAQmx.
+  - Builds the Qt GUI subdirectory.
+- cli_runner.h / cli_runner.cpp
+  - CLI runner (invoked when the GUI exe is started with `--cli`).
   - Creates camera, detector, classifier, and trigger, then runs the loop.
 - dcam_camera.h / dcam_camera.cpp
   - Minimal DCAM capture wrapper for the CLI.
@@ -37,7 +37,6 @@ Root level (CLI + shared logic)
 - event_detector.h / event_detector.cpp
   - Slower/more robust detection path (Otsu + additional filtering).
   - Used by the CLI when not in fast mode.
-- event_gate.h / event_gate.cpp
   - Gate logic so a single droplet only fires once per event.
   - Resets after a configured number of missed frames.
 - metadata_loader.h / metadata_loader.cpp
@@ -47,8 +46,8 @@ Root level (CLI + shared logic)
   - ONNX Runtime wrapper. Loads model and runs inference.
   - Handles CPU/GPU providers depending on ONNXRUNTIME build.
 - daq_trigger.h / daq_trigger.cpp
-  - NI‑DAQmx wrapper for Digital or Counter pulses.
-  - If NI‑DAQmx is not found at build time, compiled as stub (no hardware).
+  - NI-DAQmx wrapper for analog output (sine wave).
+  - If NI-DAQmx is not found at build time, compiled as stub (no hardware).
 - README_INTERNAL.md
   - Internal architecture notes, data flow, and module interactions.
 
@@ -66,7 +65,7 @@ Qt GUI (qt_hama_gui/)
   - Applies exposure, resolution, binning, bit depth, and readout speed.
 - qt_hama_gui/frame_grabber.h / frame_grabber.cpp
   - Grabs frames on a worker thread.
-  - Emits deep‑copied QImage to GUI thread for stable rendering.
+  - Emits deep-copied QImage to GUI thread for stable rendering.
 - qt_hama_gui/frame_types.h
   - Frame metadata (size, bits, FPS, delivered/dropped counts).
 - qt_hama_gui/pipeline_runner.h / pipeline_runner.cpp
@@ -76,7 +75,7 @@ Qt GUI (qt_hama_gui/)
 - qt_hama_gui/log_teebuf.h
   - Simple stdout/Qt log tee so messages are mirrored to session_log.txt.
 - qt_hama_gui/README.md
-  - GUI‑specific build notes.
+  - GUI-specific build notes.
 
 GUI features (what it does and how)
 - Live view
@@ -86,9 +85,10 @@ GUI features (what it does and how)
   - Select ONNX model and metadata JSON.
   - Configure output directory and whether to save crops/overlays.
   - Enable/disable pipeline without stopping camera.
-- LabVIEW / NI‑DAQ controls
+- LabVIEW / NI-DAQ controls
   - Shows connection status light and output configuration.
-  - Choose Digital vs Counter, device name, line/counter, pulse duration.
+  - Configure AO channel, amplitude, frequency (kHz), duration, and delay.
+  - Force Trigger button emits the configured sine output.
 - Event detection controls
   - All fast detector parameters exposed: background frames, update frames,
     reset frames, min area, min/max area fraction, min bbox, margin, diff threshold,
@@ -106,7 +106,7 @@ GUI features (what it does and how)
 
 Event detection details
 - Background mean is computed from the first N frames (bgFrames).
-- Dynamic background update uses the last N non‑event frames (bgUpdateFrames).
+- Dynamic background update uses the last N non-event frames (bgUpdateFrames).
 - Foreground mask = abs(frame - background) > diffThresh.
 - Noise reduction with blur + morphology (blurRadius, morphRadius).
 - Contours are filtered by min area, max area fraction, and min bbox size.
@@ -126,11 +126,11 @@ Logging and outputs
   - App startup, pipeline init, camera, DAQ status, and warnings.
 - Live pipeline CSV
   - Written when the pipeline is stopped.
-  - Includes per‑frame timing, detection, inference, trigger, and hit/waste decision data.
+  - Includes per-frame timing, detection, inference, trigger, and hit/waste decision data.
 - Sequence test CSV
   - Written after sequence test completes.
-  - Includes scheduling jitter, per‑frame processing time, and pipeline results.
-- Per‑run folders
+  - Includes scheduling jitter, per-frame processing time, and pipeline results.
+- Per-run folders
   - Each live run creates: pipeline_output/live_YYYYMMDD_hhmmss
   - Each sequence test creates: pipeline_output/sequence_YYYYMMDD_hhmmss
   - Crops, overlays, logs, and charts are saved inside that folder.
@@ -141,35 +141,35 @@ Build requirements
 - OpenCV (core, imgproc, imgcodecs)
 - ONNX Runtime (GPU or CPU)
 - Hamamatsu DCAM SDK (dcamapi)
-- NI‑DAQmx (optional, for trigger output)
+- NI-DAQmx (optional, for trigger output)
 
 Build (PowerShell)
 1) Configure paths (examples):
    - DCAM SDK: -D DCAM_SDK_DIR="C:/path/to/dcamsdk4"
    - ONNX Runtime: -D ONNXRUNTIME_DIR="C:/onnxruntime-gpu"
-   - NI‑DAQmx: -D NIDAQMX_DIR="C:/Program Files (x86)/National Instruments/NI-DAQ/DAQmx ANSI C Dev"
+   - NI-DAQmx: -D NIDAQMX_DIR="C:/Program Files (x86)/National Instruments/NI-DAQ/DAQmx ANSI C Dev"
 
-2) Configure and build:
+2) Configure (CMake generates the build folder) and build (MSBuild):
    cmake -S . -B build ^
      -D ONNXRUNTIME_DIR="C:/onnxruntime-gpu" ^
      -D DCAM_SDK_DIR="C:/path/to/dcamsdk4" ^
      -D NIDAQMX_DIR="C:/Program Files (x86)/National Instruments/NI-DAQ/DAQmx ANSI C Dev"
-   cmake --build build --config Release
+   & "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" "build\droplet_pipeline.sln" /m /p:Configuration=Release
 
 Run
 - GUI:
   build/qt_hama_gui/Release/droplet_pipeline.exe
-- CLI (example):
-  build/Release/droplet_pipeline_cli.exe ^
+- CLI (example, uses same exe):
+  build/qt_hama_gui/Release/droplet_pipeline.exe --cli ^
     --onnx "C:/path/to/squeezenet_final_new_condition.onnx" ^
     --metadata "C:/path/to/metadata.json" ^
     --width 1152 --height 1152 --binning 1 --bits 12 --exposure-ms 5 ^
     --bg-frames 50 --min-area 40 --max-area-frac 0.10 --margin 5 --sigma 1.0 ^
     --target-label Single ^
-    --trigger-mode counter --daq-device Dev1 --daq-counter ctr0 --pulse-high-ms 2.0 --pulse-low-ms 2.0 ^
+    --daq-channel Dev1/ao0 --daq-amp 5 --daq-freq 10000 --daq-duration-ms 2.0 --daq-delay-ms 0 ^
     --output-dir pipeline_output
 
 Notes
-- If NI‑DAQmx is not found at build time, triggers are stubbed and no hardware pulse is emitted.
+- If NI-DAQmx is not found at build time, triggers are stubbed and no hardware pulse is emitted.
 - ONNX metadata.json defines input size and normalization; keep it alongside the model.
 - The GUI is the primary entry point for live operation and sequence testing.

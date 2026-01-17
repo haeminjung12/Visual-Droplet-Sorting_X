@@ -48,10 +48,18 @@ add_executable(qt_hama_gui
   dcam_controller.cpp
   frame_grabber.cpp
   pipeline_runner.cpp
+  ../cli_runner.cpp
+  ../dcam_camera.cpp
+  ../event_detector.cpp
   ../daq_trigger.cpp
   ../fast_event_detector.cpp
   ../metadata_loader.cpp
   ../onnx_classifier.cpp
+)
+
+add_executable(daq_test_cli
+  ../daq_test_cli.cpp
+  ../daq_trigger.cpp
 )
 
 if (WIN32)
@@ -84,6 +92,10 @@ target_link_libraries(qt_hama_gui PRIVATE
   dcamapi
   ${ONNXRUNTIME_LIB}
   ${OpenCV_LIBS}
+)
+
+target_include_directories(daq_test_cli PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
 if (ONNXRUNTIME_DIR)
@@ -119,9 +131,11 @@ if (ENABLE_NIDAQMX)
       "C:/Program Files (x86)/National Instruments/NI-DAQ/DAQmx ANSI C Dev/lib/msvc"
   )
   if (NIDAQMX_INCLUDE_DIR AND NIDAQMX_LIBRARY)
-    target_compile_definitions(qt_hama_gui PRIVATE HAVE_NIDAQMX=1)
-    target_include_directories(qt_hama_gui PRIVATE ${NIDAQMX_INCLUDE_DIR})
-    target_link_libraries(qt_hama_gui PRIVATE ${NIDAQMX_LIBRARY})
+    foreach(daq_target IN ITEMS qt_hama_gui daq_test_cli)
+      target_compile_definitions(${daq_target} PRIVATE HAVE_NIDAQMX=1)
+      target_include_directories(${daq_target} PRIVATE ${NIDAQMX_INCLUDE_DIR})
+      target_link_libraries(${daq_target} PRIVATE ${NIDAQMX_LIBRARY})
+    endforeach()
   else()
     message(WARNING "NI-DAQmx not found; building with stub trigger.")
   endif()

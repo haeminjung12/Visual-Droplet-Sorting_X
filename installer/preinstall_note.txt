@@ -1,0 +1,4 @@
+Pre-install requirement
+
+- Hamamatsu DCAM driver must be installed before running this application.
+- The installer will run NI-DAQmx and VC++ Redistributable as part of setup.

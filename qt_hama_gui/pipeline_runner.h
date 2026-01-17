@@ -50,6 +50,7 @@ public:
     bool isTriggerReady() const;
     int backgroundFramesRemaining() const;
     bool processFrame(const cv::Mat& gray8, PipelineEvent& out);
+    bool fireTrigger(std::string& err);
 
 private:
     static std::string toLowerAscii(const std::string& s);

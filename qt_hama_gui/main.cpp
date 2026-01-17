@@ -18,6 +18,7 @@
 #include <atomic>
 #include <exception>
 #include <csignal>
+#include <cstdio>
 #include <thread>
 #include <vector>
 #include <memory>
@@ -32,6 +33,7 @@
 #include "frame_types.h"
 #include "dcam_controller.h"
 #include "frame_grabber.h"
+#include "../cli_runner.h"
 
 #pragma comment(lib, "Dbghelp.lib")
 
@@ -41,6 +43,7 @@ QFile gLogFile;
 QString gLogPath;
 std::atomic<bool> gCrashHandled(false);
 void logMessage(const QString& msg);
+void logMessageNoPrune(const QString& msg);
 void installLogTees();
 
 struct SequenceFrame {
@@ -645,22 +648,37 @@ void pruneLogs() {
     QString baseName = "session_log";
     QStringList files = QDir(baseDir).entryList(QStringList() << (baseName + "*.txt"), QDir::Files, QDir::Time);
     for (int i = 50; i < files.size(); ++i) {
-        QFile::remove(baseDir + "/" + files[i]);
+        QString path = baseDir + "/" + files[i];
+        QFile file(path);
+        if (!file.remove()) {
+            logMessageNoPrune(QString("Failed to remove log file %1: %2").arg(path, file.errorString()));
+        }
     }
 }
 
 void logMessage(const QString& msg) {
     QMutexLocker locker(&gLogMutex);
     if (!gLogFile.isOpen()) {
-        gLogFile.open(QIODevice::Append | QIODevice::Text);
+        if (!gLogFile.open(QIODevice::Append | QIODevice::Text)) return;
     }
-    if (!gLogFile.isOpen()) return;
     QTextStream ts(&gLogFile);
     const QString line = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz") + " " + msg;
     ts << line << "\n";
     ts.flush();
     gLogFile.close();
     pruneLogs();
+}
+
+void logMessageNoPrune(const QString& msg) {
+    QMutexLocker locker(&gLogMutex);
+    if (!gLogFile.isOpen()) {
+        if (!gLogFile.open(QIODevice::Append | QIODevice::Text)) return;
+    }
+    QTextStream ts(&gLogFile);
+    const QString line = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz") + " " + msg;
+    ts << line << "\n";
+    ts.flush();
+    gLogFile.close();
 }
 
 void qtLogHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg) {
@@ -747,6 +765,20 @@ void installLogTees() {
 
 
 int main(int argc, char *argv[]) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--cli") {
+#ifdef _WIN32
+            if (GetConsoleWindow() == nullptr) {
+                AllocConsole();
+                FILE* out = nullptr;
+                FILE* err = nullptr;
+                freopen_s(&out, "CONOUT$", "w", stdout);
+                freopen_s(&err, "CONOUT$", "w", stderr);
+            }
+#endif
+            return run_cli(argc, argv);
+        }
+    }
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName("Hamamatsu");
     QCoreApplication::setApplicationName("qt_hama_gui");
@@ -967,22 +999,27 @@ int main(int argc, char *argv[]) {
     frameSkipSpin->setRange(0, 1000);
     frameSkipSpin->setValue(0);
 
-    auto triggerModeCombo = new QComboBox;
-    triggerModeCombo->addItem("None", static_cast<int>(TriggerMode::None));
-    triggerModeCombo->addItem("Digital", static_cast<int>(TriggerMode::Digital));
-    triggerModeCombo->addItem("Counter", static_cast<int>(TriggerMode::Counter));
-    triggerModeCombo->setCurrentIndex(1);
-    auto daqDeviceEdit = new QLineEdit("Dev1");
-    auto daqLineEdit = new QLineEdit("port0/line0");
-    auto daqCounterEdit = new QLineEdit("ctr0");
-    auto pulseHighSpin = new QDoubleSpinBox;
-    pulseHighSpin->setDecimals(3);
-    pulseHighSpin->setRange(0.001, 1000.0);
-    pulseHighSpin->setValue(5.0);
-    auto pulseLowSpin = new QDoubleSpinBox;
-    pulseLowSpin->setDecimals(3);
-    pulseLowSpin->setRange(0.001, 1000.0);
-    pulseLowSpin->setValue(5.0);
+    auto daqChannelEdit = new QLineEdit("Dev1/ao0");
+    auto amplitudeSpin = new QDoubleSpinBox;
+    amplitudeSpin->setDecimals(3);
+    amplitudeSpin->setRange(0.0, 10.0);
+    amplitudeSpin->setValue(5.0);
+    amplitudeSpin->setSuffix(" V");
+    auto freqSpin = new QDoubleSpinBox;
+    freqSpin->setDecimals(3);
+    freqSpin->setRange(0.001, 200.0);
+    freqSpin->setValue(10.0);
+    freqSpin->setSuffix(" kHz");
+    auto durationSpin = new QDoubleSpinBox;
+    durationSpin->setDecimals(3);
+    durationSpin->setRange(0.1, 10000.0);
+    durationSpin->setValue(5.0);
+    durationSpin->setSuffix(" ms");
+    auto delaySpin = new QDoubleSpinBox;
+    delaySpin->setDecimals(3);
+    delaySpin->setRange(0.0, 10000.0);
+    delaySpin->setValue(0.0);
+    delaySpin->setSuffix(" ms");
 
     auto pipelineLayout = new QGridLayout;
     int row = 0;
@@ -1025,18 +1062,20 @@ int main(int argc, char *argv[]) {
     labviewLayout->addWidget(new QLabel("Status"), labRow, 0);
     labviewLayout->addLayout(labviewStatusRow, labRow++, 1, 1, 2);
     labviewLayout->addWidget(labviewOutputLabel, labRow++, 0, 1, 3);
-    labviewLayout->addWidget(new QLabel("Trigger mode"), labRow, 0);
-    labviewLayout->addWidget(triggerModeCombo, labRow++, 1, 1, 2);
-    labviewLayout->addWidget(new QLabel("DAQ device"), labRow, 0);
-    labviewLayout->addWidget(daqDeviceEdit, labRow++, 1, 1, 2);
-    labviewLayout->addWidget(new QLabel("DAQ line"), labRow, 0);
-    labviewLayout->addWidget(daqLineEdit, labRow++, 1, 1, 2);
-    labviewLayout->addWidget(new QLabel("DAQ counter"), labRow, 0);
-    labviewLayout->addWidget(daqCounterEdit, labRow++, 1, 1, 2);
-    labviewLayout->addWidget(new QLabel("Pulse high (ms)"), labRow, 0);
-    labviewLayout->addWidget(pulseHighSpin, labRow++, 1, 1, 2);
-    labviewLayout->addWidget(new QLabel("Pulse low (ms)"), labRow, 0);
-    labviewLayout->addWidget(pulseLowSpin, labRow++, 1, 1, 2);
+    labviewLayout->addWidget(new QLabel("Output range"), labRow, 0);
+    labviewLayout->addWidget(new QLabel("-10 V to +10 V"), labRow++, 1, 1, 2);
+    labviewLayout->addWidget(new QLabel("AO channel"), labRow, 0);
+    labviewLayout->addWidget(daqChannelEdit, labRow++, 1, 1, 2);
+    labviewLayout->addWidget(new QLabel("Amplitude"), labRow, 0);
+    labviewLayout->addWidget(amplitudeSpin, labRow++, 1, 1, 2);
+    labviewLayout->addWidget(new QLabel("Frequency (kHz)"), labRow, 0);
+    labviewLayout->addWidget(freqSpin, labRow++, 1, 1, 2);
+    labviewLayout->addWidget(new QLabel("Duration"), labRow, 0);
+    labviewLayout->addWidget(durationSpin, labRow++, 1, 1, 2);
+    labviewLayout->addWidget(new QLabel("Delay"), labRow, 0);
+    labviewLayout->addWidget(delaySpin, labRow++, 1, 1, 2);
+    auto labviewTestBtn = new QPushButton("Force Trigger");
+    labviewLayout->addWidget(labviewTestBtn, labRow++, 0, 1, 2);
     auto labviewReconnectBtn = new QPushButton("Reconnect LabVIEW");
     labviewLayout->addWidget(labviewReconnectBtn, labRow++, 0, 1, 2);
 
@@ -1306,37 +1345,50 @@ int main(int argc, char *argv[]) {
         return abs;
     };
 
+    QTimer labviewApplyTimer;
+    bool autoApplyLabview = true;
+    std::function<void()> scheduleLabviewApply = [](){};
     auto setLabviewStatus = [&](const QString& text, const QString& color){
         labviewStatusText->setText(text);
         labviewStatusDot->setStyleSheet(QString("background:%1;border-radius:7px;border:1px solid #333;").arg(color));
     };
+    labviewApplyTimer.setSingleShot(true);
+    labviewApplyTimer.setInterval(300);
     auto updateLabviewOutput = [&](){
-        TriggerMode mode = static_cast<TriggerMode>(triggerModeCombo->currentData().toInt());
-        if (mode == TriggerMode::None) {
+        QString channel = daqChannelEdit->text().trimmed();
+        if (channel.isEmpty()) {
             labviewOutputLabel->setText("Output: (disabled)");
             return;
         }
-        QString dev = daqDeviceEdit->text().trimmed();
-        if (mode == TriggerMode::Counter) {
-            labviewOutputLabel->setText(QString("Output: %1 / %2").arg(dev, daqCounterEdit->text().trimmed()));
-        } else {
-            labviewOutputLabel->setText(QString("Output: %1 / %2").arg(dev, daqLineEdit->text().trimmed()));
-        }
+        labviewOutputLabel->setText(QString("Output: %1 | amp=%2 V freq=%3 kHz dur=%4 ms delay=%5 ms")
+            .arg(channel)
+            .arg(amplitudeSpin->value(), 0, 'f', 2)
+            .arg(freqSpin->value(), 0, 'f', 3)
+            .arg(durationSpin->value(), 0, 'f', 2)
+            .arg(delaySpin->value(), 0, 'f', 2));
     };
     updateLabviewOutput();
     setLabviewStatus("Disconnected", "#666");
 
-    QObject::connect(triggerModeCombo, qOverload<int>(&QComboBox::currentIndexChanged), [&](){
+    QObject::connect(daqChannelEdit, &QLineEdit::textChanged, [&](){
         updateLabviewOutput();
+        scheduleLabviewApply();
     });
-    QObject::connect(daqDeviceEdit, &QLineEdit::textChanged, [&](){
+    QObject::connect(amplitudeSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), [&](){
         updateLabviewOutput();
+        scheduleLabviewApply();
     });
-    QObject::connect(daqLineEdit, &QLineEdit::textChanged, [&](){
+    QObject::connect(freqSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), [&](){
         updateLabviewOutput();
+        scheduleLabviewApply();
     });
-    QObject::connect(daqCounterEdit, &QLineEdit::textChanged, [&](){
+    QObject::connect(durationSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), [&](){
         updateLabviewOutput();
+        scheduleLabviewApply();
+    });
+    QObject::connect(delaySpin, qOverload<double>(&QDoubleSpinBox::valueChanged), [&](){
+        updateLabviewOutput();
+        scheduleLabviewApply();
     });
 
     std::shared_ptr<std::vector<SequenceFrame>> sequenceFrames;
@@ -1458,6 +1510,20 @@ int main(int argc, char *argv[]) {
         }
     };
 
+    QTimer applyTimer;
+    applyTimer.setSingleShot(true);
+    applyTimer.setInterval(250);
+    bool autoApplyCamera = false;
+    QObject::connect(&applyTimer, &QTimer::timeout, [&](){
+        if (viewerOnly) return;
+        applySettings();
+    });
+    auto scheduleApplySettings = [&](){
+        if (!autoApplyCamera || viewerOnly) return;
+        if (!controller.isOpened()) return;
+        applyTimer.start();
+    };
+
     auto setViewerOnly = [&](){
         viewerOnly = true;
         statusLabel->setText("Viewer-only mode (camera init failed).");
@@ -1496,6 +1562,7 @@ int main(int argc, char *argv[]) {
             int pixel = (bits > 8) ? DCAM_PIXELTYPE_MONO16 : DCAM_PIXELTYPE_MONO8;
             dcamprop_setvalue(controller.handle(), DCAM_IDPROP_IMAGE_PIXELTYPE, pixel);
             dcamprop_setvalue(controller.handle(), DCAM_IDPROP_BITSPERCHANNEL, bits);
+            autoApplyCamera = true;
             logLine("Init success");
             return true;
         }
@@ -1544,6 +1611,37 @@ int main(int argc, char *argv[]) {
     QObject::connect(applyBtn, &QPushButton::clicked, [&](){
         if (viewerOnly) return;
         applySettings();
+    });
+
+    QObject::connect(presetCombo, qOverload<int>(&QComboBox::currentIndexChanged), [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(customWidthSpin, qOverload<int>(&QSpinBox::valueChanged), [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(customHeightSpin, qOverload<int>(&QSpinBox::valueChanged), [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(binCombo, qOverload<int>(&QComboBox::currentIndexChanged), [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(binIndCheck, &QCheckBox::toggled, [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(binHSpin, qOverload<int>(&QSpinBox::valueChanged), [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(binVSpin, qOverload<int>(&QSpinBox::valueChanged), [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(bitsCombo, qOverload<int>(&QComboBox::currentIndexChanged), [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(exposureSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), [&](){
+        scheduleApplySettings();
+    });
+    QObject::connect(readoutCombo, qOverload<int>(&QComboBox::currentIndexChanged), [&](){
+        scheduleApplySettings();
     });
 
     QPointer<ViewerWindow> viewerWindow;
@@ -1607,6 +1705,8 @@ int main(int argc, char *argv[]) {
             if (!sequenceRunning.load() && !sequenceStarting.load()) {
                 stopLiveLogging();
             }
+        } else if (daqChannelEdit->text().trimmed().isEmpty()) {
+            setLabviewStatus("Disabled", "#666");
         } else if (labviewTriggerReady) {
             setLabviewStatus("Connected", "#2ecc71");
         } else {
@@ -1651,22 +1751,22 @@ int main(int argc, char *argv[]) {
         pipelineDetectCfg.scale = scaleSpin->value();
         pipelineDetectCfg.gapFireShift = gapFireSpin->value();
         cfg.detect = pipelineDetectCfg;
-        cfg.daq.mode = static_cast<TriggerMode>(triggerModeCombo->currentData().toInt());
-        cfg.daq.device = daqDeviceEdit->text().toStdString();
-        cfg.daq.line = daqLineEdit->text().toStdString();
-        cfg.daq.counter = daqCounterEdit->text().toStdString();
-        cfg.daq.pulseHighMs = pulseHighSpin->value();
-        cfg.daq.pulseLowMs = pulseLowSpin->value();
+        cfg.daq.channel = daqChannelEdit->text().trimmed().toStdString();
+        cfg.daq.rangeMin = -10.0;
+        cfg.daq.rangeMax = 10.0;
+        cfg.daq.amplitude = amplitudeSpin->value();
+        cfg.daq.frequencyHz = freqSpin->value() * 1000.0;
+        cfg.daq.durationMs = durationSpin->value();
+        cfg.daq.delayMs = delaySpin->value();
 
         logMessage(QString("Pipeline init paths: onnx=%1 meta=%2").arg(onnxEdit->text(), metaEdit->text()));
         logMessage(QString("Pipeline init resolved paths: onnx=%1 meta=%2").arg(onnxResolved, metaResolved));
-        logMessage(QString("DAQ config: mode=%1 device=%2 line=%3 counter=%4 pulseHigh=%5ms pulseLow=%6ms")
-            .arg(triggerModeCombo->currentText())
-            .arg(daqDeviceEdit->text().trimmed())
-            .arg(daqLineEdit->text().trimmed())
-            .arg(daqCounterEdit->text().trimmed())
-            .arg(pulseHighSpin->value(), 0, 'f', 3)
-            .arg(pulseLowSpin->value(), 0, 'f', 3));
+        logMessage(QString("DAQ config: channel=%1 range=[-10,10] amp=%2V freq=%3Hz duration=%4ms delay=%5ms")
+            .arg(daqChannelEdit->text().trimmed())
+            .arg(amplitudeSpin->value(), 0, 'f', 3)
+            .arg(freqSpin->value() * 1000.0, 0, 'f', 1)
+            .arg(durationSpin->value(), 0, 'f', 3)
+            .arg(delaySpin->value(), 0, 'f', 3));
 
         std::string err;
         {
@@ -1699,7 +1799,7 @@ int main(int argc, char *argv[]) {
             startLiveLogging();
         }
 
-        if (cfg.daq.mode == TriggerMode::None) {
+        if (cfg.daq.channel.empty()) {
             setLabviewStatus("Disabled", "#666");
         } else if (labviewTriggerReady) {
             setLabviewStatus("Connected", "#2ecc71");
@@ -1707,6 +1807,16 @@ int main(int argc, char *argv[]) {
             setLabviewStatus("Disconnected", "#c0392b");
         }
         updateLabviewOutput();
+    };
+
+    QObject::connect(&labviewApplyTimer, &QTimer::timeout, [&](){
+        if (viewerOnly) return;
+        bool enableAfter = pipelineEnableCheck->isChecked();
+        loadPipeline(enableAfter);
+    });
+    scheduleLabviewApply = [&](){
+        if (!autoApplyLabview) return;
+        labviewApplyTimer.start();
     };
 
     QObject::connect(loadPipelineBtn, &QPushButton::clicked, [&](){
@@ -1741,6 +1851,43 @@ int main(int argc, char *argv[]) {
     QObject::connect(labviewReconnectBtn, &QPushButton::clicked, [&](){
         bool enableAfter = pipelineEnableCheck->isChecked();
         loadPipeline(enableAfter);
+    });
+
+    QObject::connect(labviewTestBtn, &QPushButton::clicked, [&](){
+        std::string trigErr;
+        bool ok = false;
+        bool usedPipeline = false;
+        {
+            QMutexLocker lock(&pipelineMutex);
+            if (pipeline.isTriggerReady()) {
+                ok = pipeline.fireTrigger(trigErr);
+                usedPipeline = true;
+            }
+        }
+        if (!usedPipeline) {
+            DaqConfig cfg;
+            cfg.channel = daqChannelEdit->text().trimmed().toStdString();
+            cfg.rangeMin = -10.0;
+            cfg.rangeMax = 10.0;
+            cfg.amplitude = amplitudeSpin->value();
+            cfg.frequencyHz = freqSpin->value() * 1000.0;
+            cfg.durationMs = durationSpin->value();
+            cfg.delayMs = delaySpin->value();
+            DaqTrigger manualTrigger;
+            if (!manualTrigger.init(cfg, trigErr)) {
+                ok = false;
+            } else {
+                ok = manualTrigger.fire(trigErr);
+            }
+        }
+        if (ok) {
+            statusLabel->setText("DAQ trigger sent.");
+            setLabviewStatus("Connected", "#2ecc71");
+        } else {
+            statusLabel->setText("DAQ trigger failed: " + QString::fromStdString(trigErr));
+            setLabviewStatus("Disconnected", "#c0392b");
+            logMessage(QString("DAQ force trigger failed: %1").arg(QString::fromStdString(trigErr)));
+        }
     });
 
     QObject::connect(captureBtn, &QPushButton::clicked, [&](){
@@ -2457,12 +2604,11 @@ int main(int argc, char *argv[]) {
         QString metaResolved = resolveAppRelative(metaEdit->text());
         QString targetLabel = targetLabelEdit->text().trimmed();
         QString seqFolder = seqFolderEdit->text().trimmed();
-        QString triggerMode = triggerModeCombo->currentText();
-        QString daqDevice = daqDeviceEdit->text().trimmed();
-        QString daqLine = daqLineEdit->text().trimmed();
-        QString daqCounter = daqCounterEdit->text().trimmed();
-        double pulseHigh = pulseHighSpin->value();
-        double pulseLow = pulseLowSpin->value();
+        QString daqChannel = daqChannelEdit->text().trimmed();
+        double daqAmp = amplitudeSpin->value();
+        double daqFreqHz = freqSpin->value() * 1000.0;
+        double daqDuration = durationSpin->value();
+        double daqDelay = delaySpin->value();
         QDir out(outDir);
         out.mkpath(".");
         QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
@@ -2489,7 +2635,7 @@ int main(int argc, char *argv[]) {
         int gapFireShift = gapFireSpin->value();
 
         sequenceThread = std::thread([&, frames, fps, displayEvery, logPath, outDir, onnxResolved, metaResolved, targetLabel, seqFolder,
-                                      triggerMode, daqDevice, daqLine, daqCounter, pulseHigh, pulseLow,
+                                      daqChannel, daqAmp, daqFreqHz, daqDuration, daqDelay,
                                       frameSkip, bgFrames, bgUpdate, resetFrames, minArea, minAreaFrac, maxAreaFrac,
                                       minBbox, margin, diffThresh, blurRadius, morphRadius, scale, gapFireShift](){
             QFile logFile(logPath);
@@ -2528,12 +2674,13 @@ int main(int argc, char *argv[]) {
             ts << "# detect_morph_radius=" << morphRadius << "\n";
             ts << "# detect_scale=" << QString::number(scale, 'f', 3) << "\n";
             ts << "# detect_gap_fire_shift=" << gapFireShift << "\n";
-            ts << "# daq_mode=" << triggerMode << "\n";
-            ts << "# daq_device=" << daqDevice << "\n";
-            ts << "# daq_line=" << daqLine << "\n";
-            ts << "# daq_counter=" << daqCounter << "\n";
-            ts << "# daq_pulse_high_ms=" << QString::number(pulseHigh, 'f', 3) << "\n";
-            ts << "# daq_pulse_low_ms=" << QString::number(pulseLow, 'f', 3) << "\n";
+            ts << "# daq_channel=" << daqChannel << "\n";
+            ts << "# daq_range_min=-10\n";
+            ts << "# daq_range_max=10\n";
+            ts << "# daq_amplitude_v=" << QString::number(daqAmp, 'f', 3) << "\n";
+            ts << "# daq_frequency_hz=" << QString::number(daqFreqHz, 'f', 1) << "\n";
+            ts << "# daq_duration_ms=" << QString::number(daqDuration, 'f', 3) << "\n";
+            ts << "# daq_delay_ms=" << QString::number(daqDelay, 'f', 3) << "\n";
             ts << "index,filename,scheduled_ms,actual_ms,jitter_ms,wall_time,proc_ms,processed,pipeline_enabled,pipeline_ready,bg_remaining,skip_reason,"
                   "detected,fired,area,bbox_x,bbox_y,bbox_w,bbox_h,crop_x,crop_y,crop_w,crop_h,crop_path,label,score,triggered,trigger_ok,frame_number,"
                   "event_dir,decision_frame,decision_event_id\n";
