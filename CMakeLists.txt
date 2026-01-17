@@ -18,7 +18,6 @@ set(NIDAQMX_DIR "" CACHE PATH "Path to NI-DAQmx (optional)")
 
 option(ENABLE_NIDAQMX "Enable NI-DAQmx trigger support" ON)
 option(BUILD_QT_GUI "Build Qt GUI app" ON)
-option(BUILD_CLI "Build headless CLI app" ON)
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 
@@ -43,76 +42,6 @@ endif()
 
 set(DCAM_INCLUDE_DIR "${DCAM_SDK_DIR}/inc")
 set(DCAM_LIB_DIR "${DCAM_SDK_DIR}/lib/win64")
-
-if (BUILD_CLI)
-  add_executable(droplet_pipeline_cli
-    main.cpp
-    dcam_camera.cpp
-    fast_event_detector.cpp
-    event_detector.cpp
-    metadata_loader.cpp
-    onnx_classifier.cpp
-    daq_trigger.cpp
-  )
-
-  target_include_directories(droplet_pipeline_cli PRIVATE
-    ${DCAM_INCLUDE_DIR}
-    ${ONNXRUNTIME_INCLUDE_DIR}
-    ${OpenCV_INCLUDE_DIRS}
-    ${CMAKE_CURRENT_SOURCE_DIR}
-  )
-
-  target_link_directories(droplet_pipeline_cli PRIVATE
-    ${DCAM_LIB_DIR}
-  )
-
-  target_link_libraries(droplet_pipeline_cli PRIVATE
-    dcamapi
-    ${ONNXRUNTIME_LIB}
-    ${OpenCV_LIBS}
-  )
-endif()
-
-if (ONNXRUNTIME_DIR AND BUILD_CLI)
-  set(ONNX_DLLS
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_shared.dll"
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_cuda.dll"
-    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_tensorrt.dll"
-  )
-  foreach(onnx_dll IN LISTS ONNX_DLLS)
-    if (EXISTS "${onnx_dll}")
-      add_custom_command(TARGET droplet_pipeline_cli POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${onnx_dll}" $<TARGET_FILE_DIR:droplet_pipeline_cli>
-      )
-    endif()
-  endforeach()
-endif()
-
-if (ENABLE_NIDAQMX AND BUILD_CLI)
-  find_path(NIDAQMX_INCLUDE_DIR NIDAQmx.h
-    PATHS
-      "${NIDAQMX_DIR}/include"
-      "C:/Program Files/National Instruments/NI-DAQ/DAQmx ANSI C Dev/include"
-      "C:/Program Files (x86)/National Instruments/NI-DAQ/DAQmx ANSI C Dev/include"
-  )
-  find_library(NIDAQMX_LIBRARY NAMES NIDAQmx
-    PATHS
-      "${NIDAQMX_DIR}/lib/x64/msvc"
-      "${NIDAQMX_DIR}/lib/msvc"
-      "C:/Program Files/National Instruments/NI-DAQ/DAQmx ANSI C Dev/lib/msvc"
-      "C:/Program Files (x86)/National Instruments/Shared/ExternalCompilerSupport/C/lib64/msvc"
-      "C:/Program Files (x86)/National Instruments/NI-DAQ/DAQmx ANSI C Dev/lib/x64/msvc"
-      "C:/Program Files (x86)/National Instruments/NI-DAQ/DAQmx ANSI C Dev/lib/msvc"
-  )
-  if (NIDAQMX_INCLUDE_DIR AND NIDAQMX_LIBRARY)
-    target_compile_definitions(droplet_pipeline_cli PRIVATE HAVE_NIDAQMX=1)
-    target_include_directories(droplet_pipeline_cli PRIVATE ${NIDAQMX_INCLUDE_DIR})
-    target_link_libraries(droplet_pipeline_cli PRIVATE ${NIDAQMX_LIBRARY})
-  else()
-    message(WARNING "NI-DAQmx not found; building with stub trigger.")
-  endif()
-endif()
 
 if (BUILD_QT_GUI)
   add_subdirectory(qt_hama_gui)

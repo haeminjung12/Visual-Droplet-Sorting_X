@@ -1,20 +1,16 @@
 #pragma once
 
 #include <string>
-
-enum class TriggerMode {
-    None,
-    Digital,
-    Counter
-};
+#include <vector>
 
 struct DaqConfig {
-    TriggerMode mode = TriggerMode::Digital;
-    std::string device = "Dev1";
-    std::string line = "port0/line0";
-    std::string counter = "ctr0";
-    double pulseHighMs = 5.0;
-    double pulseLowMs = 5.0;
+    std::string channel = "Dev1/ao0";
+    double rangeMin = -10.0;
+    double rangeMax = 10.0;
+    double amplitude = 5.0;
+    double frequencyHz = 1000.0;
+    double durationMs = 5.0;
+    double delayMs = 0.0;
 };
 
 class DaqTrigger {
@@ -33,5 +29,8 @@ private:
 
 #ifdef HAVE_NIDAQMX
     void* task_;
+    double sampleRate_ = 0.0;
+    int samples_ = 0;
+    std::vector<double> waveform_;
 #endif
 };

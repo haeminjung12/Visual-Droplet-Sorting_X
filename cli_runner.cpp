@@ -1,3 +1,5 @@
+#include "cli_runner.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -159,22 +161,15 @@ void printUsage() {
         "  --reset-frames <n>            Frames with no detection to reset gate (default: 3)\n"
         "  --gap-fire-shift <px>         Min centroid shift to fire after gap (fast mode)\n"
         "  --target-label <name>         Label that triggers DAQ (default: Single)\n"
-        "  --trigger-mode <none|digital|counter> (default: digital)\n"
-        "  --daq-device <name>           NI device (default: Dev1)\n"
-        "  --daq-line <line>             Digital line (default: port0/line0)\n"
-        "  --daq-counter <ctr>           Counter line (default: ctr0)\n"
-        "  --pulse-high-ms <ms>          Trigger high time (default: 5)\n"
-        "  --pulse-low-ms <ms>           Trigger low time (default: 5)\n"
+        "  --daq-channel <Dev1/ao0>      Analog output channel (default: Dev1/ao0)\n"
+        "  --daq-amp <V>                 Sine amplitude (default: 5)\n"
+        "  --daq-freq <Hz>               Sine frequency (default: 1000)\n"
+        "  --daq-duration-ms <ms>        Sine duration (default: 5)\n"
+        "  --daq-delay-ms <ms>           Delay before output (default: 0)\n"
         "  --output-dir <dir>            Save event crops/overlays\n"
         "  --save-overlay                Save overlay image with bbox/mask\n"
         "  --continuous                  Do not stop after first event\n"
         "  --help                        Show this help\n";
-}
-
-TriggerMode parseTriggerMode(const std::string& s) {
-    if (s == "none") return TriggerMode::None;
-    if (s == "counter") return TriggerMode::Counter;
-    return TriggerMode::Digital;
 }
 
 int parsePixelType(const std::string& s) {
@@ -213,7 +208,7 @@ cv::Mat toGray8(const cv::Mat& src, int bits) {
 }
 
 
-int main(int argc, char** argv) {
+int run_cli(int argc, char** argv) {
     Args args = parseArgs(argc, argv);
     if (hasFlag(args, "--help")) {
         printUsage();
@@ -453,13 +448,14 @@ int main(int argc, char** argv) {
 
     DaqTrigger trigger;
     DaqConfig daq;
-    daq.mode = parseTriggerMode(getString(args, "--trigger-mode", "digital"));
-    daq.device = getString(args, "--daq-device", "Dev1");
-    daq.line = getString(args, "--daq-line", "port0/line0");
-    daq.counter = getString(args, "--daq-counter", "ctr0");
-    daq.pulseHighMs = getDouble(args, "--pulse-high-ms", 5.0);
-    daq.pulseLowMs = getDouble(args, "--pulse-low-ms", 5.0);
-    if (daq.mode != TriggerMode::None) {
+    daq.channel = getString(args, "--daq-channel", "Dev1/ao0");
+    daq.rangeMin = -10.0;
+    daq.rangeMax = 10.0;
+    daq.amplitude = getDouble(args, "--daq-amp", 5.0);
+    daq.frequencyHz = getDouble(args, "--daq-freq", 1000.0);
+    daq.durationMs = getDouble(args, "--daq-duration-ms", 5.0);
+    daq.delayMs = getDouble(args, "--daq-delay-ms", 0.0);
+    if (!daq.channel.empty()) {
         if (!trigger.init(daq, err)) {
             std::cout << "DAQ init disabled: " << err << "\n";
         }

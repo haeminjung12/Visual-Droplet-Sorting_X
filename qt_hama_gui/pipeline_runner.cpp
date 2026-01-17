@@ -54,7 +54,7 @@ bool PipelineRunner::init(const PipelineConfig& cfg, std::string& err) {
 
     detector_ = std::make_unique<FastEventDetector>(cfg_.detect);
 
-    if (cfg_.daq.mode != TriggerMode::None) {
+    if (!cfg_.daq.channel.empty()) {
         std::string trigErr;
         if (!trigger_.init(cfg_.daq, trigErr)) {
             err = "DAQ init disabled: " + trigErr;
@@ -85,6 +85,14 @@ bool PipelineRunner::isTriggerReady() const {
 int PipelineRunner::backgroundFramesRemaining() const {
     if (!detector_) return 0;
     return detector_->backgroundFramesRemaining();
+}
+
+bool PipelineRunner::fireTrigger(std::string& err) {
+    if (!triggerReady_) {
+        err = "DAQ trigger not ready";
+        return false;
+    }
+    return trigger_.fire(err);
 }
 
 bool PipelineRunner::processFrame(const cv::Mat& gray8In, PipelineEvent& out) {
