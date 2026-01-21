@@ -46,3 +46,5 @@ set(DCAM_LIB_DIR "${DCAM_SDK_DIR}/lib/win64")
 if (BUILD_QT_GUI)
   add_subdirectory(qt_hama_gui)
 endif()
+
+add_subdirectory(sequence_headless)

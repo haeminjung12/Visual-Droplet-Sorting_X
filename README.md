@@ -24,6 +24,9 @@ Root level (shared logic + CLI runner)
 - CMakeLists.txt
   - Top-level build script. Configures vcpkg, OpenCV, ONNX Runtime, DCAM, NI-DAQmx.
   - Builds the Qt GUI subdirectory.
+- sequence_headless/
+  - Headless sequence test runner (folder input + FPS).
+  - Batches loading when image count is large to stay within available RAM.
 - cli_runner.h / cli_runner.cpp
   - CLI runner (invoked when the GUI exe is started with `--cli`).
   - Creates camera, detector, classifier, and trigger, then runs the loop.
@@ -130,9 +133,14 @@ Logging and outputs
 - Sequence test CSV
   - Written after sequence test completes.
   - Includes scheduling jitter, per-frame processing time, and pipeline results.
+- Sequence event trajectory CSV
+  - Per-event trajectory and final hit/waste decision summary.
+- Sequence summary CSV
+  - Class counts, events detected, hit/waste totals, and efficiency/precision/recall.
 - Per-run folders
   - Each live run creates: pipeline_output/live_YYYYMMDD_hhmmss
   - Each sequence test creates: pipeline_output/sequence_YYYYMMDD_hhmmss
+  - Headless sequence output creates: <output_base>/sequence_YYYYMMDD_hhmmss
   - Crops, overlays, logs, and charts are saved inside that folder.
 
 Build requirements
@@ -168,6 +176,10 @@ Run
     --target-label Single ^
     --daq-channel Dev1/ao0 --daq-amp 5 --daq-freq 10000 --daq-duration-ms 2.0 --daq-delay-ms 0 ^
     --output-dir pipeline_output
+- Headless sequence CLI:
+  build/sequence_headless/Release/sequence_headless.exe --input "C:/path/to/folder" --fps 183.5 ^
+    --output "C:/path/to/pipeline_output" --onnx "C:/path/to/model.onnx" --metadata "C:/path/to/metadata.json"
+  - Writes to <output_base>/sequence_YYYYMMDD_hhmmss and prints progress/status lines to stdout.
 
 Notes
 - If NI-DAQmx is not found at build time, triggers are stubbed and no hardware pulse is emitted.

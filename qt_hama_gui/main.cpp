@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <dbghelp.h>
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <atomic>
 #include <exception>
@@ -88,8 +89,205 @@ struct StatsSnapshot {
     int lastDecisionEventId = 0;
 };
 
+QString normalizeEventLabel(const QString& label) {
+    return label.isEmpty() ? "(unclassified)" : label;
+}
+
+QString decideEventDirection(double cumulativeDy, double lastY, int frameHeight, bool hasCentroid) {
+    if (!hasCentroid) return "Unknown";
+    double threshold = 2.0;
+    if (frameHeight > 0) {
+        threshold = std::max(threshold, frameHeight * 0.02);
+    }
+    bool movedUp = cumulativeDy < -threshold;
+    bool movedDown = cumulativeDy > threshold;
+    bool hasFrame = (frameHeight > 0);
+    double mid = hasFrame ? frameHeight * 0.5 : 0.0;
+    if (movedUp && (!hasFrame || lastY < mid)) {
+        return "Waste";
+    }
+    if (movedDown && (!hasFrame || lastY >= mid)) {
+        return "Hit";
+    }
+    if (hasFrame) {
+        return (lastY < mid) ? "Waste" : "Hit";
+    }
+    return (cumulativeDy < 0.0) ? "Waste" : "Hit";
+}
+
+struct SequenceEventRecord {
+    int eventId = 0;
+    QString label;
+    int startFrame = -1;
+    int decisionFrame = -1;
+    QString decisionDir;
+    int firedFrame = -1;
+    int framesTracked = 0;
+    double startX = 0.0;
+    double startY = 0.0;
+    double endX = 0.0;
+    double endY = 0.0;
+    double minY = 0.0;
+    double maxY = 0.0;
+    double cumulativeDy = 0.0;
+    double pathLength = 0.0;
+    int frameHeight = 0;
+};
+
+struct SequenceEventTracker {
+    int resetFrames = 2;
+    bool eventActive = false;
+    int missCount = 0;
+    int currentEventId = 0;
+    cv::Point2f startCentroid = {0.0f, 0.0f};
+    cv::Point2f lastCentroid = {0.0f, 0.0f};
+    bool hasCentroid = false;
+    double cumulativeDy = 0.0;
+    double lastY = 0.0;
+    double minY = 0.0;
+    double maxY = 0.0;
+    double pathLength = 0.0;
+    int frameHeight = 0;
+    QString currentLabel;
+    int startFrame = -1;
+    int firedFrame = -1;
+    int framesTracked = 0;
+    QString lastEventDir = "Unknown";
+    QString lastEventLabel;
+    int lastDecisionFrame = -1;
+    int lastDecisionEventId = 0;
+    int lastFrameNumber = -1;
+    std::vector<SequenceEventRecord> events;
+
+    void reset(int resetFramesIn) {
+        resetFrames = resetFramesIn;
+        eventActive = false;
+        missCount = 0;
+        currentEventId = 0;
+        hasCentroid = false;
+        cumulativeDy = 0.0;
+        lastY = 0.0;
+        minY = 0.0;
+        maxY = 0.0;
+        pathLength = 0.0;
+        frameHeight = 0;
+        currentLabel.clear();
+        startFrame = -1;
+        firedFrame = -1;
+        framesTracked = 0;
+        lastEventDir = "Unknown";
+        lastEventLabel.clear();
+        lastDecisionFrame = -1;
+        lastDecisionEventId = 0;
+        lastFrameNumber = -1;
+        events.clear();
+    }
+
+    void startEvent(const PipelineEvent& evt) {
+        eventActive = true;
+        missCount = 0;
+        currentEventId++;
+        startCentroid = evt.centroid;
+        lastCentroid = evt.centroid;
+        hasCentroid = true;
+        cumulativeDy = 0.0;
+        lastY = evt.centroid.y;
+        minY = evt.centroid.y;
+        maxY = evt.centroid.y;
+        pathLength = 0.0;
+        framesTracked = 1;
+        if (evt.frameHeight > 0) frameHeight = evt.frameHeight;
+        currentLabel = normalizeEventLabel(QString::fromStdString(evt.label));
+        startFrame = static_cast<int>(evt.frameNumber);
+        firedFrame = evt.fired ? static_cast<int>(evt.frameNumber) : -1;
+    }
+
+    void endEvent(int decisionFrame) {
+        if (!eventActive) return;
+        QString dir = decideEventDirection(cumulativeDy, lastY, frameHeight, hasCentroid);
+
+        SequenceEventRecord rec;
+        rec.eventId = currentEventId;
+        rec.label = normalizeEventLabel(currentLabel);
+        rec.startFrame = startFrame;
+        rec.decisionFrame = decisionFrame;
+        rec.decisionDir = dir;
+        rec.firedFrame = firedFrame;
+        rec.framesTracked = framesTracked;
+        rec.startX = startCentroid.x;
+        rec.startY = startCentroid.y;
+        rec.endX = lastCentroid.x;
+        rec.endY = lastCentroid.y;
+        rec.minY = minY;
+        rec.maxY = maxY;
+        rec.cumulativeDy = cumulativeDy;
+        rec.pathLength = pathLength;
+        rec.frameHeight = frameHeight;
+        events.push_back(rec);
+
+        lastEventDir = dir;
+        lastEventLabel = rec.label;
+        lastDecisionFrame = decisionFrame;
+        lastDecisionEventId = currentEventId;
+        eventActive = false;
+        hasCentroid = false;
+        missCount = 0;
+        currentLabel.clear();
+        cumulativeDy = 0.0;
+        pathLength = 0.0;
+        framesTracked = 0;
+        startFrame = -1;
+        firedFrame = -1;
+    }
+
+    void update(const PipelineEvent& evt, bool processed) {
+        if (!processed) return;
+        lastFrameNumber = static_cast<int>(evt.frameNumber);
+        if (evt.fired) {
+            if (eventActive) {
+                endEvent(static_cast<int>(evt.frameNumber));
+            }
+            startEvent(evt);
+            return;
+        }
+        if (evt.detected) {
+            if (!eventActive) {
+                startEvent(evt);
+            } else {
+                double dx = static_cast<double>(evt.centroid.x - lastCentroid.x);
+                double dy = static_cast<double>(evt.centroid.y - lastCentroid.y);
+                pathLength += std::sqrt(dx * dx + dy * dy);
+                cumulativeDy += dy;
+                lastCentroid = evt.centroid;
+                hasCentroid = true;
+                lastY = evt.centroid.y;
+                minY = std::min(minY, static_cast<double>(evt.centroid.y));
+                maxY = std::max(maxY, static_cast<double>(evt.centroid.y));
+                framesTracked++;
+                if (evt.frameHeight > 0) frameHeight = evt.frameHeight;
+                missCount = 0;
+            }
+        } else if (eventActive) {
+            missCount++;
+            if (missCount >= resetFrames) {
+                endEvent(static_cast<int>(evt.frameNumber));
+            }
+        }
+    }
+
+    void finalize() {
+        if (!eventActive) return;
+        int decisionFrame = (lastFrameNumber >= 0) ? lastFrameNumber : startFrame;
+        endEvent(decisionFrame);
+    }
+};
+
+QMutex liveEventMutex;
+SequenceEventTracker liveEventTracker;
+
 struct LiveLogRecord {
     QString wallTime;
+    qint64 elapsedMs = 0;
     qint64 frameIndex = 0;
     qint64 delivered = 0;
     qint64 dropped = 0;
@@ -868,6 +1066,22 @@ int main(int argc, char *argv[]) {
     bitsCombo->addItems({"8","12","16"});
     bitsCombo->setCurrentIndex(0); // default 8-bit
 
+    auto lutMinSpin = new QSpinBox;
+    auto lutMaxSpin = new QSpinBox;
+    auto lutMinSlider = new QSlider(Qt::Horizontal);
+    auto lutMaxSlider = new QSlider(Qt::Horizontal);
+    auto lutRangeLabel = new QLabel("Scale: 0 - 255");
+    lutMinSpin->setRange(0, 255);
+    lutMaxSpin->setRange(0, 255);
+    lutMinSpin->setValue(0);
+    lutMaxSpin->setValue(255);
+    lutMinSlider->setRange(0, 255);
+    lutMaxSlider->setRange(0, 255);
+    lutMinSlider->setValue(0);
+    lutMaxSlider->setValue(255);
+    lutMinSlider->setTickPosition(QSlider::TicksBelow);
+    lutMaxSlider->setTickPosition(QSlider::TicksBelow);
+
     auto binIndCheck = new QCheckBox("Independent binning");
     auto binHSpin = new QSpinBox;
     auto binVSpin = new QSpinBox;
@@ -948,6 +1162,24 @@ int main(int argc, char *argv[]) {
     tabFormats->setLayout(grid);
 
     tabWidget->addTab(tabFormats, "Formats / Speed");
+
+    auto lutLayout = new QGridLayout;
+    lutLayout->setContentsMargins(0, 0, 0, 0);
+    lutLayout->addWidget(lutRangeLabel, 0, 0, 1, 3);
+    lutLayout->addWidget(new QLabel("Min"), 1, 0);
+    lutLayout->addWidget(lutMinSpin, 1, 1);
+    lutLayout->addWidget(lutMinSlider, 1, 2);
+    lutLayout->addWidget(new QLabel("Max"), 2, 0);
+    lutLayout->addWidget(lutMaxSpin, 2, 1);
+    lutLayout->addWidget(lutMaxSlider, 2, 2);
+    auto lutWidget = new QWidget;
+    lutWidget->setLayout(lutLayout);
+    auto lutTab = new QWidget;
+    auto lutTabLayout = new QVBoxLayout;
+    lutTabLayout->addWidget(lutWidget);
+    lutTabLayout->addStretch(1);
+    lutTab->setLayout(lutTabLayout);
+    tabWidget->addTab(lutTab, "LUT");
 
     auto saveLayout = new QGridLayout;
     saveLayout->addWidget(new QLabel("Save path"),0,0);
@@ -1417,6 +1649,77 @@ int main(int argc, char *argv[]) {
     QMutex pipelineMutex;
     std::atomic<bool> pipelineEnabled(false);
     bool labviewTriggerReady = false;
+    std::array<unsigned char, 256> lutTable{};
+    QMutex lutMutex;
+    std::atomic<int> lutMinValue{0};
+    std::atomic<int> lutMaxValue{255};
+    std::atomic<int> lutRangeMax{255};
+    std::atomic<bool> lutEnabled{false};
+
+    auto rebuildLut = [&](){
+        int rangeMax = lutRangeMax.load();
+        if (rangeMax <= 0) rangeMax = 255;
+        int minVal = std::clamp(lutMinValue.load(), 0, rangeMax);
+        int maxVal = std::clamp(lutMaxValue.load(), 0, rangeMax);
+        bool enabled = (minVal > 0 || maxVal < rangeMax);
+        std::array<unsigned char, 256> temp{};
+        if (!enabled || maxVal <= minVal) {
+            for (int i = 0; i < 256; ++i) {
+                temp[i] = static_cast<unsigned char>(i);
+            }
+            enabled = false;
+        } else {
+            double scale = 255.0 / static_cast<double>(rangeMax);
+            int min8 = std::clamp(static_cast<int>(std::lround(minVal * scale)), 0, 255);
+            int max8 = std::clamp(static_cast<int>(std::lround(maxVal * scale)), 0, 255);
+            if (max8 <= min8) {
+                for (int i = 0; i < 256; ++i) {
+                    temp[i] = static_cast<unsigned char>(i);
+                }
+                enabled = false;
+            } else {
+                for (int i = 0; i < 256; ++i) {
+                    if (i <= min8) {
+                        temp[i] = 0;
+                    } else if (i >= max8) {
+                        temp[i] = 255;
+                    } else {
+                        temp[i] = static_cast<unsigned char>(
+                            (i - min8) * 255 / (max8 - min8));
+                    }
+                }
+            }
+        }
+        {
+            QMutexLocker lock(&lutMutex);
+            lutTable = temp;
+        }
+        lutEnabled.store(enabled);
+    };
+
+    auto applyLutToImage = [&](const QImage& img)->QImage {
+        if (img.isNull() || !lutEnabled.load()) return img;
+        QImage out = img;
+        if (out.format() != QImage::Format_Grayscale8) {
+            out = out.convertToFormat(QImage::Format_Grayscale8);
+        } else {
+            out.detach();
+        }
+        std::array<unsigned char, 256> tableCopy;
+        {
+            QMutexLocker lock(&lutMutex);
+            tableCopy = lutTable;
+        }
+        const int w = out.width();
+        const int h = out.height();
+        for (int y = 0; y < h; ++y) {
+            unsigned char* row = out.scanLine(y);
+            for (int x = 0; x < w; ++x) {
+                row[x] = tableCopy[row[x]];
+            }
+        }
+        return out;
+    };
 
     auto refreshExposureLimits = [&](){
         if (!controller.isOpened()) return;
@@ -1434,6 +1737,91 @@ int main(int argc, char *argv[]) {
             exposureSpin->setValue(cur * 1000.0);
         }
     };
+
+    auto updateLutRange = [&](int bits){
+        int prevRange = lutRangeMax.load();
+        int maxVal = 255;
+        if (bits >= 1 && bits <= 16) {
+            maxVal = (1 << bits) - 1;
+        }
+        lutRangeMax.store(maxVal);
+        lutRangeLabel->setText(QString("Scale: 0 - %1").arg(maxVal));
+        {
+            QSignalBlocker b1(lutMinSpin);
+            QSignalBlocker b2(lutMaxSpin);
+            QSignalBlocker b3(lutMinSlider);
+            QSignalBlocker b4(lutMaxSlider);
+            lutMinSpin->setRange(0, maxVal);
+            lutMaxSpin->setRange(0, maxVal);
+            lutMinSlider->setRange(0, maxVal);
+            lutMaxSlider->setRange(0, maxVal);
+        }
+        int minVal = std::clamp(lutMinValue.load(), 0, maxVal);
+        int maxValCur = std::clamp(lutMaxValue.load(), 0, maxVal);
+        if (minVal == 0 && maxValCur == prevRange) {
+            maxValCur = maxVal;
+        }
+        if (maxValCur < minVal) maxValCur = minVal;
+        {
+            QSignalBlocker b1(lutMinSpin);
+            QSignalBlocker b2(lutMaxSpin);
+            QSignalBlocker b3(lutMinSlider);
+            QSignalBlocker b4(lutMaxSlider);
+            lutMinSpin->setValue(minVal);
+            lutMaxSpin->setValue(maxValCur);
+            lutMinSlider->setValue(minVal);
+            lutMaxSlider->setValue(maxValCur);
+        }
+        lutMinValue.store(minVal);
+        lutMaxValue.store(maxValCur);
+        rebuildLut();
+    };
+
+    auto setLutMin = [&](int v){
+        int rangeMax = lutRangeMax.load();
+        v = std::clamp(v, 0, rangeMax);
+        int maxVal = lutMaxValue.load();
+        if (v > maxVal) {
+            maxVal = v;
+            QSignalBlocker b1(lutMaxSpin);
+            QSignalBlocker b2(lutMaxSlider);
+            lutMaxSpin->setValue(maxVal);
+            lutMaxSlider->setValue(maxVal);
+            lutMaxValue.store(maxVal);
+        }
+        {
+            QSignalBlocker b1(lutMinSpin);
+            QSignalBlocker b2(lutMinSlider);
+            lutMinSpin->setValue(v);
+            lutMinSlider->setValue(v);
+        }
+        lutMinValue.store(v);
+        rebuildLut();
+    };
+
+    auto setLutMax = [&](int v){
+        int rangeMax = lutRangeMax.load();
+        v = std::clamp(v, 0, rangeMax);
+        int minVal = lutMinValue.load();
+        if (v < minVal) {
+            minVal = v;
+            QSignalBlocker b1(lutMinSpin);
+            QSignalBlocker b2(lutMinSlider);
+            lutMinSpin->setValue(minVal);
+            lutMinSlider->setValue(minVal);
+            lutMinValue.store(minVal);
+        }
+        {
+            QSignalBlocker b1(lutMaxSpin);
+            QSignalBlocker b2(lutMaxSlider);
+            lutMaxSpin->setValue(v);
+            lutMaxSlider->setValue(v);
+        }
+        lutMaxValue.store(v);
+        rebuildLut();
+    };
+
+    updateLutRange(bitsCombo->currentText().toInt());
 
     QObject::connect(presetCombo, qOverload<int>(&QComboBox::currentIndexChanged), [&](int){
         bool isCustom = presetCombo->currentData().toSize().width() < 0;
@@ -1635,7 +2023,20 @@ int main(int argc, char *argv[]) {
         scheduleApplySettings();
     });
     QObject::connect(bitsCombo, qOverload<int>(&QComboBox::currentIndexChanged), [&](){
+        updateLutRange(bitsCombo->currentText().toInt());
         scheduleApplySettings();
+    });
+    QObject::connect(lutMinSpin, qOverload<int>(&QSpinBox::valueChanged), [&](int v){
+        setLutMin(v);
+    });
+    QObject::connect(lutMaxSpin, qOverload<int>(&QSpinBox::valueChanged), [&](int v){
+        setLutMax(v);
+    });
+    QObject::connect(lutMinSlider, &QSlider::valueChanged, [&](int v){
+        setLutMin(v);
+    });
+    QObject::connect(lutMaxSlider, &QSlider::valueChanged, [&](int v){
+        setLutMax(v);
     });
     QObject::connect(exposureSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), [&](){
         scheduleApplySettings();
@@ -1854,40 +2255,50 @@ int main(int argc, char *argv[]) {
     });
 
     QObject::connect(labviewTestBtn, &QPushButton::clicked, [&](){
-        std::string trigErr;
-        bool ok = false;
-        bool usedPipeline = false;
+        DaqConfig cfg;
+        cfg.channel = daqChannelEdit->text().trimmed().toStdString();
+        cfg.rangeMin = -10.0;
+        cfg.rangeMax = 10.0;
+        cfg.amplitude = amplitudeSpin->value();
+        cfg.frequencyHz = freqSpin->value() * 1000.0;
+        cfg.durationMs = durationSpin->value();
+        cfg.delayMs = delaySpin->value();
+
+        bool canUsePipeline = false;
         {
             QMutexLocker lock(&pipelineMutex);
-            if (pipeline.isTriggerReady()) {
+            canUsePipeline = pipeline.isTriggerReady();
+        }
+
+        statusLabel->setText("DAQ trigger queued...");
+        std::thread([&, cfg, canUsePipeline](){
+            std::string trigErr;
+            bool ok = false;
+            bool usedPipeline = false;
+            if (canUsePipeline) {
+                QMutexLocker lock(&pipelineMutex);
                 ok = pipeline.fireTrigger(trigErr);
                 usedPipeline = true;
             }
-        }
-        if (!usedPipeline) {
-            DaqConfig cfg;
-            cfg.channel = daqChannelEdit->text().trimmed().toStdString();
-            cfg.rangeMin = -10.0;
-            cfg.rangeMax = 10.0;
-            cfg.amplitude = amplitudeSpin->value();
-            cfg.frequencyHz = freqSpin->value() * 1000.0;
-            cfg.durationMs = durationSpin->value();
-            cfg.delayMs = delaySpin->value();
-            DaqTrigger manualTrigger;
-            if (!manualTrigger.init(cfg, trigErr)) {
-                ok = false;
-            } else {
-                ok = manualTrigger.fire(trigErr);
+            if (!usedPipeline) {
+                DaqTrigger manualTrigger;
+                if (!manualTrigger.init(cfg, trigErr)) {
+                    ok = false;
+                } else {
+                    ok = manualTrigger.fire(trigErr);
+                }
             }
-        }
-        if (ok) {
-            statusLabel->setText("DAQ trigger sent.");
-            setLabviewStatus("Connected", "#2ecc71");
-        } else {
-            statusLabel->setText("DAQ trigger failed: " + QString::fromStdString(trigErr));
-            setLabviewStatus("Disconnected", "#c0392b");
-            logMessage(QString("DAQ force trigger failed: %1").arg(QString::fromStdString(trigErr)));
-        }
+            QMetaObject::invokeMethod(&window, [=](){
+                if (ok) {
+                    statusLabel->setText("DAQ trigger sent.");
+                    setLabviewStatus("Connected", "#2ecc71");
+                } else {
+                    statusLabel->setText("DAQ trigger failed: " + QString::fromStdString(trigErr));
+                    setLabviewStatus("Disconnected", "#c0392b");
+                    logMessage(QString("DAQ force trigger failed: %1").arg(QString::fromStdString(trigErr)));
+                }
+            }, Qt::QueuedConnection);
+        }).detach();
     });
 
     QObject::connect(captureBtn, &QPushButton::clicked, [&](){
@@ -2317,8 +2728,9 @@ int main(int argc, char *argv[]) {
         pipelineReady = false;
         if (!pipelineEnabled.load() || img.isNull()) return false;
 
-        cv::Mat gray(img.height(), img.width(), CV_8UC1,
-                     const_cast<uchar*>(img.bits()), img.bytesPerLine());
+        QImage lutImg = applyLutToImage(img);
+        cv::Mat gray(lutImg.height(), lutImg.width(), CV_8UC1,
+                     const_cast<uchar*>(lutImg.bits()), lutImg.bytesPerLine());
         cv::Mat grayCopy = gray.clone();
 
         auto t0 = std::chrono::steady_clock::now();
@@ -2391,10 +2803,293 @@ int main(int argc, char *argv[]) {
         return path;
     };
 
+    auto writeLiveSequenceLog = [&](const QString& outDir,
+                                    const QString& timestamp,
+                                    const std::vector<LiveLogRecord>& records,
+                                    const QString& onnxResolved,
+                                    const QString& metaResolved,
+                                    const QString& targetLabel,
+                                    const QString& daqChannel,
+                                    double daqAmp,
+                                    double daqFreqHz,
+                                    double daqDuration,
+                                    double daqDelay,
+                                    int frameSkip,
+                                    int bgFrames,
+                                    int bgUpdate,
+                                    int resetFrames,
+                                    double minArea,
+                                    double minAreaFrac,
+                                    double maxAreaFrac,
+                                    int minBbox,
+                                    int margin,
+                                    int diffThresh,
+                                    int blurRadius,
+                                    int morphRadius,
+                                    double scale,
+                                    int gapFireShift,
+                                    int displayEvery)->QString {
+        if (outDir.isEmpty()) return QString();
+        QDir out(outDir);
+        out.mkpath(".");
+        QString logPath = out.filePath("sequence_test_log_live_" + timestamp + ".csv");
+        QFile logFile(logPath);
+        if (!logFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            return QString();
+        }
+        double avgFps = 0.0;
+        int fpsCount = 0;
+        for (const auto& rec : records) {
+            if (rec.fps > 0.0) {
+                avgFps += rec.fps;
+                fpsCount++;
+            }
+        }
+        if (fpsCount > 0) {
+            avgFps /= fpsCount;
+        }
+        int pipelineEnabledBefore = (!records.empty() && records.front().pipelineEnabled) ? 1 : 0;
+
+        QTextStream ts(&logFile);
+        ts << "# sequence_folder=live\n";
+        ts << "# fps=" << QString::number(avgFps, 'f', 2) << "\n";
+        ts << "# frames=" << records.size() << "\n";
+        ts << "# display_every=" << displayEvery << "\n";
+        ts << "# output_dir=" << outDir << "\n";
+        ts << "# onnx=" << onnxResolved << "\n";
+        ts << "# metadata=" << metaResolved << "\n";
+        ts << "# target_label=" << targetLabel << "\n";
+        ts << "# pipeline_enabled_before=" << pipelineEnabledBefore << "\n";
+        ts << "# pipeline_forced=0\n";
+        ts << "# frame_skip=" << frameSkip << "\n";
+        ts << "# detect_bg_frames=" << bgFrames << "\n";
+        ts << "# detect_bg_update=" << bgUpdate << "\n";
+        ts << "# detect_reset_frames=" << resetFrames << "\n";
+        ts << "# detect_min_area=" << QString::number(minArea, 'f', 3) << "\n";
+        ts << "# detect_min_area_frac=" << QString::number(minAreaFrac, 'f', 6) << "\n";
+        ts << "# detect_max_area_frac=" << QString::number(maxAreaFrac, 'f', 6) << "\n";
+        ts << "# detect_min_bbox=" << minBbox << "\n";
+        ts << "# detect_margin=" << margin << "\n";
+        ts << "# detect_diff_thresh=" << diffThresh << "\n";
+        ts << "# detect_blur_radius=" << blurRadius << "\n";
+        ts << "# detect_morph_radius=" << morphRadius << "\n";
+        ts << "# detect_scale=" << QString::number(scale, 'f', 3) << "\n";
+        ts << "# detect_gap_fire_shift=" << gapFireShift << "\n";
+        ts << "# daq_channel=" << daqChannel << "\n";
+        ts << "# daq_range_min=-10\n";
+        ts << "# daq_range_max=10\n";
+        ts << "# daq_amplitude_v=" << QString::number(daqAmp, 'f', 3) << "\n";
+        ts << "# daq_frequency_hz=" << QString::number(daqFreqHz, 'f', 1) << "\n";
+        ts << "# daq_duration_ms=" << QString::number(daqDuration, 'f', 3) << "\n";
+        ts << "# daq_delay_ms=" << QString::number(daqDelay, 'f', 3) << "\n";
+        ts << "index,filename,scheduled_ms,actual_ms,jitter_ms,wall_time,proc_ms,processed,pipeline_enabled,pipeline_ready,bg_remaining,skip_reason,"
+              "detected,fired,area,bbox_x,bbox_y,bbox_w,bbox_h,crop_x,crop_y,crop_w,crop_h,crop_path,label,score,triggered,trigger_ok,frame_number,"
+              "event_dir,decision_frame,decision_event_id\n";
+
+        for (int i = 0; i < static_cast<int>(records.size()); ++i) {
+            const auto& rec = records[i];
+            double scheduledMs = (avgFps > 0.0) ? (static_cast<double>(i) * 1000.0 / avgFps) : 0.0;
+            double actualMs = static_cast<double>(rec.elapsedMs);
+            double jitterMs = actualMs - scheduledMs;
+            QString filename = QString("live_frame_%1").arg(rec.frameIndex);
+
+            ts << i << ","
+               << csvQuote(filename) << ","
+               << QString::number(scheduledMs,'f',3) << ","
+               << QString::number(actualMs,'f',3) << ","
+               << QString::number(jitterMs,'f',3) << ","
+               << csvQuote(rec.wallTime) << ","
+               << QString::number(rec.procMs,'f',3) << ","
+               << (rec.processed ? "1" : "0") << ","
+               << (rec.pipelineEnabled ? "1" : "0") << ","
+               << (rec.pipelineReady ? "1" : "0") << ","
+               << rec.bgRemaining << ","
+               << csvQuote(rec.skipReason) << ","
+               << (rec.detected ? "1" : "0") << ","
+               << (rec.fired ? "1" : "0") << ","
+               << QString::number(rec.area,'f',1) << ","
+               << rec.bboxX << "," << rec.bboxY << "," << rec.bboxW << "," << rec.bboxH << ","
+               << rec.cropX << "," << rec.cropY << "," << rec.cropW << "," << rec.cropH << ","
+               << csvQuote(rec.cropPath) << ","
+               << csvQuote(rec.label) << ","
+               << QString::number(rec.score,'f',4) << ","
+               << (rec.triggered ? "1" : "0") << ","
+               << (rec.triggerOk ? "1" : "0") << ","
+               << rec.frameIndex << ","
+               << csvQuote(rec.eventDir) << ","
+               << rec.decisionFrame << ","
+               << rec.decisionEventId
+               << "\n";
+        }
+        ts.flush();
+        logFile.close();
+        return logPath;
+    };
+
+    auto writeEventTrajectoryCsv = [&](const QString& outDir,
+                                       const QString& filename,
+                                       const std::vector<SequenceEventRecord>& events)->QString {
+        if (outDir.isEmpty()) return QString();
+        QDir out(outDir);
+        out.mkpath(".");
+        QString path = out.filePath(filename);
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            return QString();
+        }
+        QTextStream ts(&file);
+        auto csvQuote = [](const QString& s)->QString {
+            QString out = s;
+            out.replace("\"", "\"\"");
+            return "\"" + out + "\"";
+        };
+        ts << "event_id,label,detected_frame,decision_frame,decision_dir,fired_frame,frames_tracked,"
+              "start_x,start_y,end_x,end_y,min_y,max_y,cumulative_dy,path_length,frame_height\n";
+        for (const auto& rec : events) {
+            ts << rec.eventId << ","
+               << csvQuote(rec.label) << ","
+               << rec.startFrame << ","
+               << rec.decisionFrame << ","
+               << csvQuote(rec.decisionDir) << ","
+               << rec.firedFrame << ","
+               << rec.framesTracked << ","
+               << QString::number(rec.startX, 'f', 3) << ","
+               << QString::number(rec.startY, 'f', 3) << ","
+               << QString::number(rec.endX, 'f', 3) << ","
+               << QString::number(rec.endY, 'f', 3) << ","
+               << QString::number(rec.minY, 'f', 3) << ","
+               << QString::number(rec.maxY, 'f', 3) << ","
+               << QString::number(rec.cumulativeDy, 'f', 3) << ","
+               << QString::number(rec.pathLength, 'f', 3) << ","
+               << rec.frameHeight
+               << "\n";
+        }
+        ts.flush();
+        file.close();
+        return path;
+    };
+
+    auto writeSequenceSummaryCsv = [&](const QString& outDir,
+                                       const QString& filename,
+                                       const std::vector<SequenceEventRecord>& events,
+                                       const QString& targetLabel,
+                                       int totalFrames,
+                                       double fps,
+                                       const QString& sequenceFolder,
+                                       const QString& outputDir,
+                                       const QString& onnxResolved,
+                                       const QString& metaResolved)->QString {
+        if (outDir.isEmpty()) return QString();
+        QDir out(outDir);
+        out.mkpath(".");
+        QString path = out.filePath(filename);
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            return QString();
+        }
+        QTextStream ts(&file);
+        auto csvQuote = [](const QString& s)->QString {
+            QString out = s;
+            out.replace("\"", "\"\"");
+            return "\"" + out + "\"";
+        };
+        QString target = targetLabel.trimmed();
+        if (target.isEmpty()) {
+            target = "Single";
+        }
+        QString targetLower = target.toLower();
+        QMap<QString, int> classCounts;
+        int hitCount = 0;
+        int wasteCount = 0;
+        int truePositive = 0;
+        int trueNegative = 0;
+        int falsePositive = 0;
+        int falseNegative = 0;
+        for (const auto& rec : events) {
+            QString label = normalizeEventLabel(rec.label);
+            classCounts[label] = classCounts.value(label) + 1;
+            QString labelLower = label.toLower();
+            bool isTarget = (labelLower == targetLower);
+            bool isHit = (rec.decisionDir == "Hit");
+            bool isWaste = (rec.decisionDir == "Waste");
+            if (isHit) hitCount++;
+            if (isWaste) wasteCount++;
+            if (isTarget) {
+                if (isHit) {
+                    truePositive++;
+                } else if (isWaste) {
+                    falseNegative++;
+                }
+            } else {
+                if (isWaste) {
+                    trueNegative++;
+                } else if (isHit) {
+                    falsePositive++;
+                }
+            }
+        }
+        int totalDecisions = static_cast<int>(events.size());
+        double efficiency = totalDecisions > 0 ? static_cast<double>(truePositive + trueNegative) / totalDecisions : 0.0;
+        double precision = (truePositive + falsePositive) > 0
+            ? static_cast<double>(truePositive) / (truePositive + falsePositive)
+            : 0.0;
+        double recall = (truePositive + falseNegative) > 0
+            ? static_cast<double>(truePositive) / (truePositive + falseNegative)
+            : 0.0;
+
+        ts << "metric,value\n";
+        ts << "sequence_folder," << csvQuote(sequenceFolder) << "\n";
+        ts << "output_dir," << csvQuote(outputDir) << "\n";
+        ts << "onnx," << csvQuote(onnxResolved) << "\n";
+        ts << "metadata," << csvQuote(metaResolved) << "\n";
+        ts << "target_label," << csvQuote(target) << "\n";
+        ts << "fps," << QString::number(fps, 'f', 2) << "\n";
+        ts << "frames_total," << totalFrames << "\n";
+        ts << "events_detected," << events.size() << "\n";
+        ts << "hits," << hitCount << "\n";
+        ts << "wastes," << wasteCount << "\n";
+        ts << "true_positive_single_hit," << truePositive << "\n";
+        ts << "false_negative_single_waste," << falseNegative << "\n";
+        ts << "true_negative_non_single_waste," << trueNegative << "\n";
+        ts << "false_positive_non_single_hit," << falsePositive << "\n";
+        ts << "sorting_efficiency," << QString::number(efficiency, 'f', 4) << "\n";
+        ts << "precision," << QString::number(precision, 'f', 4) << "\n";
+        ts << "recall," << QString::number(recall, 'f', 4) << "\n";
+
+        ts << "\nclass,label,count\n";
+        for (auto it = classCounts.begin(); it != classCounts.end(); ++it) {
+            ts << "class," << csvQuote(it.key()) << "," << it.value() << "\n";
+        }
+
+        ts << "\nsingle_event_id,detected_frame,decision_frame,decision_dir,fired_frame,frames_tracked,start_y,end_y,cumulative_dy,path_length\n";
+        for (const auto& rec : events) {
+            QString labelLower = normalizeEventLabel(rec.label).toLower();
+            if (labelLower != targetLower) continue;
+            ts << rec.eventId << ","
+               << rec.startFrame << ","
+               << rec.decisionFrame << ","
+               << csvQuote(rec.decisionDir) << ","
+               << rec.firedFrame << ","
+               << rec.framesTracked << ","
+               << QString::number(rec.startY, 'f', 3) << ","
+               << QString::number(rec.endY, 'f', 3) << ","
+               << QString::number(rec.cumulativeDy, 'f', 3) << ","
+               << QString::number(rec.pathLength, 'f', 3)
+               << "\n";
+        }
+        ts.flush();
+        file.close();
+        return path;
+    };
+
     startLiveLogging = [&](){
         QMutexLocker lock(&liveLogMutex);
         liveLog.clear();
         liveLogStart = QDateTime::currentDateTime();
+        {
+            QMutexLocker eventLock(&liveEventMutex);
+            liveEventTracker.reset(resetFramesSpin->value());
+        }
         liveLogging.store(true);
     };
 
@@ -2405,6 +3100,12 @@ int main(int argc, char *argv[]) {
             QMutexLocker lock(&liveLogMutex);
             records = liveLog;
         }
+        std::vector<SequenceEventRecord> liveEvents;
+        {
+            QMutexLocker eventLock(&liveEventMutex);
+            liveEventTracker.finalize();
+            liveEvents = liveEventTracker.events;
+        }
         StatsSnapshot snap = getStatsSnapshot();
         QString outDir = outputEdit->text().trimmed();
         if (outDir.isEmpty()) outDir = QCoreApplication::applicationDirPath();
@@ -2413,11 +3114,80 @@ int main(int argc, char *argv[]) {
             : QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
         QString prefix = "live_" + timestamp;
         QString logPath = writeLiveLogCsv(outDir, prefix, records);
+        QString onnxResolved = resolveAppRelative(onnxEdit->text());
+        QString metaResolved = resolveAppRelative(metaEdit->text());
+        QString targetLabel = targetLabelEdit->text().trimmed();
+        QString daqChannel = daqChannelEdit->text().trimmed();
+        double daqAmp = amplitudeSpin->value();
+        double daqFreqHz = freqSpin->value() * 1000.0;
+        double daqDuration = durationSpin->value();
+        double daqDelay = delaySpin->value();
+        int frameSkip = frameSkipSpin->value();
+        int bgFrames = bgFramesSpin->value();
+        int bgUpdate = bgUpdateSpin->value();
+        int resetFrames = resetFramesSpin->value();
+        double minArea = minAreaSpin->value();
+        double minAreaFrac = minAreaFracSpin->value();
+        double maxAreaFrac = maxAreaFracSpin->value();
+        int minBbox = minBboxSpin->value();
+        int margin = marginSpin->value();
+        int diffThresh = diffThreshSpin->value();
+        int blurRadius = blurRadiusSpin->value();
+        int morphRadius = morphRadiusSpin->value();
+        double scale = scaleSpin->value();
+        int gapFireShift = gapFireSpin->value();
+        int displayEvery = std::max(1, displayEverySpin->value());
+        double avgFps = 0.0;
+        int fpsCount = 0;
+        for (const auto& rec : records) {
+            if (rec.fps > 0.0) {
+                avgFps += rec.fps;
+                fpsCount++;
+            }
+        }
+        if (fpsCount > 0) {
+            avgFps /= fpsCount;
+        }
+        QString seqLogPath = writeLiveSequenceLog(outDir, timestamp, records,
+                                                 onnxResolved, metaResolved, targetLabel,
+                                                 daqChannel, daqAmp, daqFreqHz, daqDuration, daqDelay,
+                                                 frameSkip, bgFrames, bgUpdate, resetFrames, minArea, minAreaFrac, maxAreaFrac,
+                                                 minBbox, margin, diffThresh, blurRadius, morphRadius, scale, gapFireShift,
+                                                 displayEvery);
+        QString trajPath = writeEventTrajectoryCsv(outDir,
+                                                   "sequence_event_trajectory_live_" + timestamp + ".csv",
+                                                   liveEvents);
+        QString summaryPath = writeSequenceSummaryCsv(outDir,
+                                                      "sequence_summary_live_" + timestamp + ".csv",
+                                                      liveEvents,
+                                                      targetLabel,
+                                                      static_cast<int>(records.size()),
+                                                      avgFps,
+                                                      QString(),
+                                                      outDir,
+                                                      onnxResolved,
+                                                      metaResolved);
         saveStatsFigures(outDir, prefix, snap);
         updateStatsFigureWindow(snap);
         if (!logPath.isEmpty()) {
-            statusLabel->setText("Pipeline stopped. Log: " + logPath);
+            QString status = "Pipeline stopped. Log: " + logPath;
+            if (!seqLogPath.isEmpty()) {
+                status += "\nSequence log: " + seqLogPath;
+            }
+            if (!summaryPath.isEmpty()) {
+                status += "\nSummary: " + summaryPath;
+            }
+            statusLabel->setText(status);
             logLine("Saved live pipeline log to " + logPath);
+            if (!seqLogPath.isEmpty()) {
+                logLine("Saved live sequence log to " + seqLogPath);
+            }
+            if (!trajPath.isEmpty()) {
+                logLine("Saved live event trajectory to " + trajPath);
+            }
+            if (!summaryPath.isEmpty()) {
+                logLine("Saved live sequence summary to " + summaryPath);
+            }
         } else {
             statusLabel->setText("Pipeline stopped. Failed to write log.");
         }
@@ -2686,6 +3456,9 @@ int main(int argc, char *argv[]) {
                   "event_dir,decision_frame,decision_event_id\n";
             ts.flush();
 
+            SequenceEventTracker tracker;
+            tracker.reset(resetFrames);
+
             auto csvQuote = [](const QString& s)->QString {
                 QString out = s;
                 out.replace("\"", "\"\"");
@@ -2742,8 +3515,10 @@ int main(int argc, char *argv[]) {
                     skipReason = "frame_skipped";
                 }
 
+                tracker.update(evt, processed);
+
                 if (displayEvery > 0 && (static_cast<int>(i) % displayEvery == 0)) {
-                    QImage imgCopy = frame.image;
+                    QImage imgCopy = applyLutToImage(frame.image);
                     QMetaObject::invokeMethod(&window, [&, imgCopy, meta, i, fps, frames](){
                         imageView->setImage(imgCopy);
                         lastFrame = imgCopy;
@@ -2756,7 +3531,6 @@ int main(int argc, char *argv[]) {
 
                 QString cropPath = QString::fromStdString(evt.cropPath);
                 QString label = QString::fromStdString(evt.label);
-                StatsSnapshot snap = getStatsSnapshot();
                 ts << i << ","
                    << csvQuote(QFileInfo(frame.path).fileName()) << ","
                    << QString::number(scheduledMs,'f',3) << ","
@@ -2780,31 +3554,53 @@ int main(int argc, char *argv[]) {
                    << (evt.triggered ? "1" : "0") << ","
                    << (evt.triggerOk ? "1" : "0") << ","
                    << evt.frameNumber << ","
-                   << csvQuote(snap.lastEventDir) << ","
-                   << snap.lastDecisionFrame << ","
-                   << snap.lastDecisionEventId
+                   << csvQuote(tracker.lastEventDir) << ","
+                   << tracker.lastDecisionFrame << ","
+                   << tracker.lastDecisionEventId
                    << "\n";
                 if (i % 50 == 0) {
                     ts.flush();
                 }
             }
 
+            tracker.finalize();
+            QString trajPath = writeEventTrajectoryCsv(outDir,
+                                                       "sequence_event_trajectory_" + timestamp + ".csv",
+                                                       tracker.events);
+            QString summaryPath = writeSequenceSummaryCsv(outDir,
+                                                          "sequence_summary_" + timestamp + ".csv",
+                                                          tracker.events,
+                                                          targetLabel,
+                                                          static_cast<int>(frames->size()),
+                                                          fps,
+                                                          seqFolder,
+                                                          outDir,
+                                                          onnxResolved,
+                                                          metaResolved);
+
             ts.flush();
             logFile.close();
 
             sequenceRunning.store(false);
-            QMetaObject::invokeMethod(&window, [&, logPath](){
+            QMetaObject::invokeMethod(&window, [&, logPath, trajPath, summaryPath](){
                 setSequenceUiRunning(false);
                 seqStatusLabel->setText("Sequence finished.");
                 statusLabel->setText("Sequence test finished.");
-                seqLogLabel->setText("Log: " + logPath);
+                QString logText = "Log: " + logPath;
+                if (!trajPath.isEmpty()) {
+                    logText += "\nTrajectory: " + trajPath;
+                }
+                if (!summaryPath.isEmpty()) {
+                    logText += "\nSummary: " + summaryPath;
+                }
+                seqLogLabel->setText(logText);
             }, Qt::QueuedConnection);
         });
     });
 
     grabber.setRecordHook([saveMutex, saveBuffer, &recording, &recordedFrames,
                            &pipelineEnabled, &sequenceRunning, &processPipelineFrame,
-                           &liveLogging, &liveLogMutex, &liveLog, &getStatsSnapshot](const QImage& img, const FrameMeta& meta, double fps){
+                           &liveLogging, &liveLogMutex, &liveLog, &getStatsSnapshot, &liveLogStart](const QImage& img, const FrameMeta& meta, double fps){
         if (recording.load()) {
             QMutexLocker lk(saveMutex.get());
             saveBuffer->push_back(img.copy());
@@ -2820,6 +3616,16 @@ int main(int argc, char *argv[]) {
         bool processed = processPipelineFrame(img, evt, bgRemaining, pipelineReady, &procMs);
 
         if (liveLogging.load()) {
+            QString lastEventDir;
+            int lastDecisionFrame = -1;
+            int lastDecisionEventId = 0;
+            {
+                QMutexLocker eventLock(&liveEventMutex);
+                liveEventTracker.update(evt, processed);
+                lastEventDir = liveEventTracker.lastEventDir;
+                lastDecisionFrame = liveEventTracker.lastDecisionFrame;
+                lastDecisionEventId = liveEventTracker.lastDecisionEventId;
+            }
             bool enabledNow = pipelineEnabled.load();
             QString skipReason;
             if (!enabledNow) {
@@ -2832,6 +3638,9 @@ int main(int argc, char *argv[]) {
 
             LiveLogRecord rec;
             rec.wallTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
+            rec.elapsedMs = liveLogStart.isValid()
+                ? liveLogStart.msecsTo(QDateTime::currentDateTime())
+                : 0;
             rec.frameIndex = meta.frameIndex;
             rec.delivered = meta.delivered;
             rec.dropped = meta.dropped;
@@ -2860,9 +3669,9 @@ int main(int argc, char *argv[]) {
             rec.triggered = evt.triggered;
             rec.triggerOk = evt.triggerOk;
             StatsSnapshot snap = getStatsSnapshot();
-            rec.eventDir = snap.lastEventDir;
-            rec.decisionFrame = snap.lastDecisionFrame;
-            rec.decisionEventId = snap.lastDecisionEventId;
+            rec.eventDir = lastEventDir;
+            rec.decisionFrame = lastDecisionFrame;
+            rec.decisionEventId = lastDecisionEventId;
             rec.hitCount = snap.hitCount;
             rec.wasteCount = snap.wasteCount;
             QMutexLocker lk(&liveLogMutex);
@@ -2873,8 +3682,9 @@ int main(int argc, char *argv[]) {
     QObject::connect(&grabber, &FrameGrabber::frameReady, &window,
                      [&, imageView, statsLabel, logCheck](const QImage& img, FrameMeta meta, double fps){
         if (!img.isNull()) {
-            imageView->setImage(img);
-            lastFrame = img;
+            QImage viewImg = applyLutToImage(img);
+            imageView->setImage(viewImg);
+            lastFrame = viewImg;
         }
         lastMeta = meta;
         statsLabel->setText(QString("Resolution: %1 x %2\nBinning: %3\nBits: %4\nFPS: %5 (Cam: %6)\nFrame: %7\nDelivered: %8 Dropped: %9\nReadout: %10")

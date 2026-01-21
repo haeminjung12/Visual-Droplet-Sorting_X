@@ -8,6 +8,81 @@
 #include <opencv2/imgproc.hpp>
 
 namespace fs = std::filesystem;
+namespace {
+constexpr size_t kMaxTriggerQueue = 4;
+
+std::string sanitizeLabel(const std::string& label) {
+    std::string out;
+    out.reserve(label.size());
+    for (unsigned char c : label) {
+        if (std::isalnum(c) || c == '-' || c == '_') {
+            out.push_back(static_cast<char>(c));
+        } else if (c == ' ') {
+            out.push_back('_');
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty()) {
+        out = "unclassified";
+    }
+    return out;
+}
+}
+
+PipelineRunner::~PipelineRunner() {
+    stopTriggerWorker();
+}
+
+void PipelineRunner::startTriggerWorker() {
+    stopTriggerWorker();
+    if (!triggerReady_) return;
+    triggerStop_ = false;
+    triggerThread_ = std::thread([this](){
+        while (true) {
+            {
+                std::unique_lock<std::mutex> lock(triggerMutex_);
+                triggerCv_.wait(lock, [&](){
+                    return triggerStop_ || !triggerQueue_.empty();
+                });
+                if (triggerStop_) break;
+                triggerQueue_.pop_front();
+            }
+            std::string trigErr;
+            trigger_.fire(trigErr);
+        }
+    });
+}
+
+void PipelineRunner::stopTriggerWorker() {
+    {
+        std::lock_guard<std::mutex> lock(triggerMutex_);
+        triggerStop_ = true;
+        triggerQueue_.clear();
+    }
+    triggerCv_.notify_all();
+    if (triggerThread_.joinable()) {
+        triggerThread_.join();
+    }
+    triggerStop_ = false;
+}
+
+bool PipelineRunner::enqueueTrigger(std::string* err) {
+    if (!triggerReady_) {
+        if (err) *err = "DAQ trigger not ready";
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(triggerMutex_);
+        if (triggerQueue_.size() >= kMaxTriggerQueue) {
+            if (err) *err = "DAQ trigger busy";
+            return false;
+        }
+        triggerQueue_.push_back(1);
+    }
+    triggerCv_.notify_one();
+    return true;
+}
 
 std::string PipelineRunner::toLowerAscii(const std::string& s) {
     std::string out;
@@ -38,6 +113,7 @@ cv::Rect PipelineRunner::makeSquareRect(const cv::Rect& bbox, const cv::Size& si
 }
 
 bool PipelineRunner::init(const PipelineConfig& cfg, std::string& err) {
+    stopTriggerWorker();
     cfg_ = cfg;
     ready_ = false;
     triggerReady_ = false;
@@ -60,6 +136,7 @@ bool PipelineRunner::init(const PipelineConfig& cfg, std::string& err) {
             err = "DAQ init disabled: " + trigErr;
         } else {
             triggerReady_ = true;
+            startTriggerWorker();
         }
     }
 
@@ -88,11 +165,7 @@ int PipelineRunner::backgroundFramesRemaining() const {
 }
 
 bool PipelineRunner::fireTrigger(std::string& err) {
-    if (!triggerReady_) {
-        err = "DAQ trigger not ready";
-        return false;
-    }
-    return trigger_.fire(err);
+    return enqueueTrigger(&err);
 }
 
 bool PipelineRunner::processFrame(const cv::Mat& gray8In, PipelineEvent& out) {
@@ -145,19 +218,21 @@ bool PipelineRunner::processFrame(const cv::Mat& gray8In, PipelineEvent& out) {
     if (triggerReady_ && !cls.label.empty()) {
         if (toLowerAscii(cls.label) == targetLabelLower_) {
             out.triggered = true;
-            std::string trigErr;
-            out.triggerOk = trigger_.fire(trigErr);
+            out.triggerOk = enqueueTrigger(nullptr);
         }
     }
 
     if (!cfg_.outputDir.empty()) {
         fs::path base(cfg_.outputDir);
         fs::create_directories(base);
-        std::string name = "event_frame_" + std::to_string(frameCounter_) + "_label_" + cls.label;
+        std::string labelName = sanitizeLabel(out.label.empty() ? "unclassified" : out.label);
+        fs::path labelDir = base / labelName;
+        fs::create_directories(labelDir);
+        std::string name = "event_frame_" + std::to_string(frameCounter_) + "_label_" + labelName;
         if (cfg_.saveCrop) {
             cv::Mat resized;
             cv::resize(crop, resized, cv::Size(cfg_.cropSize, cfg_.cropSize), 0, 0, cv::INTER_AREA);
-            fs::path outPath = base / (name + ".png");
+            fs::path outPath = labelDir / (name + ".png");
             cv::imwrite(outPath.string(), resized);
             out.cropPath = outPath.string();
         }
@@ -165,7 +240,7 @@ bool PipelineRunner::processFrame(const cv::Mat& gray8In, PipelineEvent& out) {
             cv::Mat overlay;
             cv::cvtColor(gray8, overlay, cv::COLOR_GRAY2BGR);
             cv::rectangle(overlay, squareRect, cv::Scalar(0, 255, 0), 2);
-            fs::path outPath = base / (name + "_overlay.png");
+            fs::path outPath = labelDir / (name + "_overlay.png");
             cv::imwrite(outPath.string(), overlay);
             out.overlayPath = outPath.string();
         }

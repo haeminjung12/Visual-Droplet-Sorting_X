@@ -1,7 +1,11 @@
 #pragma once
 
+#include <condition_variable>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include <opencv2/core.hpp>
 
@@ -44,6 +48,8 @@ struct PipelineEvent {
 
 class PipelineRunner {
 public:
+    PipelineRunner() = default;
+    ~PipelineRunner();
     bool init(const PipelineConfig& cfg, std::string& err);
     void reset();
     bool isReady() const;
@@ -55,6 +61,9 @@ public:
 private:
     static std::string toLowerAscii(const std::string& s);
     static cv::Rect makeSquareRect(const cv::Rect& bbox, const cv::Size& size);
+    bool enqueueTrigger(std::string* err);
+    void startTriggerWorker();
+    void stopTriggerWorker();
 
     PipelineConfig cfg_;
     Metadata meta_;
@@ -65,4 +74,9 @@ private:
     bool triggerReady_ = false;
     int64_t frameCounter_ = 0;
     std::string targetLabelLower_;
+    std::mutex triggerMutex_;
+    std::condition_variable triggerCv_;
+    std::deque<int> triggerQueue_;
+    std::thread triggerThread_;
+    bool triggerStop_ = false;
 };
